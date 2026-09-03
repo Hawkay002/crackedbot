@@ -1,0 +1,4 @@
+# Replace with your domain. Caddy fetches and renews the TLS certificate automatically.
+bot.yourdomain.com {
+	reverse_proxy bot:8080
+}

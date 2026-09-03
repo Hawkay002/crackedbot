@@ -1,0 +1,34 @@
+# Fly.io config for crackedbot. See docs/DEPLOY.md Part C.
+app = "crackedbot"
+primary_region = "iad"
+
+[build]
+
+[env]
+  DATA_DIR = "/data"
+  PORT = "8080"
+  PUBLIC_URL = "https://crackedbot.fly.dev"
+  LOG_LEVEL = "info"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # A gateway bot must never sleep. These two lines keep exactly one machine alive.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "20s"
+    method = "GET"
+    path = "/health"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
