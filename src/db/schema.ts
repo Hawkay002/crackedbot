@@ -77,6 +77,52 @@ export const reviews = sqliteTable(
   (t) => [index('reviews_guild_status').on(t.guildId, t.status)],
 );
 
+export const votes = sqliteTable(
+  'votes',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    guildId: text('guild_id').notNull(),
+    /** the applicant */
+    discordId: text('discord_id').notNull(),
+    githubId: text('github_id').notNull(),
+    githubLogin: text('github_login').notNull(),
+    scoreId: integer('score_id').notNull(),
+    /** tier whose role is granted if the vote passes */
+    tier: text('tier').notNull(),
+    status: text('status', { enum: ['open', 'admitted', 'rejected', 'escalated', 'cancelled'] })
+      .notNull()
+      .default('open'),
+    channelId: text('channel_id'),
+    messageId: text('message_id'),
+    quorum: integer('quorum').notNull(),
+    /** stored as an integer percent so the row is self-describing after rubric changes */
+    thresholdPct: integer('threshold_pct').notNull(),
+    yes: integer('yes').notNull().default(0),
+    no: integer('no').notNull().default(0),
+    openedAt: text('opened_at').notNull().default(now),
+    closesAt: text('closes_at').notNull(),
+    closedAt: text('closed_at'),
+    /** discord id of the mod who closed early, or 'scheduler' */
+    closedBy: text('closed_by'),
+  },
+  (t) => [
+    index('votes_guild_status').on(t.guildId, t.status),
+    index('votes_closes').on(t.status, t.closesAt),
+  ],
+);
+
+export const ballots = sqliteTable(
+  'ballots',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    voteId: integer('vote_id').notNull(),
+    voterId: text('voter_id').notNull(),
+    choice: text('choice', { enum: ['yes', 'no'] }).notNull(),
+    at: text('at').notNull().default(now),
+  },
+  (t) => [uniqueIndex('ballots_vote_voter').on(t.voteId, t.voterId)],
+);
+
 export const audit = sqliteTable(
   'audit',
   {
@@ -95,3 +141,4 @@ export type GuildRow = typeof guilds.$inferSelect;
 export type LinkRow = typeof links.$inferSelect;
 export type ScoreRow = typeof scores.$inferSelect;
 export type ReviewRow = typeof reviews.$inferSelect;
+export type VoteRow = typeof votes.$inferSelect;

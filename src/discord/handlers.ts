@@ -26,6 +26,7 @@ import {
   rubricSchema,
   type ScoreResult,
   tierIndex,
+  type VoteScope,
 } from '../scoring/index.js';
 import { type GuildConfig, getGuild, isConfigured, updateGuild } from '../services/guilds.js';
 import {
@@ -37,6 +38,16 @@ import {
   syncTierRoles,
   upsertLink,
 } from '../services/verification.js';
+import {
+  cancelOpenVotes,
+  castBallot,
+  getVote,
+  listOpenVotes,
+  openVoteFor,
+  refreshVoteMessage,
+  resolveVote,
+  voterEligibility,
+} from '../services/votes.js';
 import { COLORS, linkButton, receiptEmbed } from './receipt.js';
 
 const EPHEMERAL = { flags: MessageFlags.Ephemeral } as const;
@@ -92,6 +103,8 @@ async function handleCommand(ctx: AppContext, i: ChatInputCommandInteraction): P
       return rescore(ctx, i);
     case 'review':
       return reviewList(ctx, i);
+    case 'votes':
+      return votesList(ctx, i);
     default:
       await i.reply({ content: 'Unknown command.', ...EPHEMERAL });
   }
@@ -117,6 +130,14 @@ async function verify(ctx: AppContext, i: ChatInputCommandInteraction<'cached'>)
   if (existing) {
     await i.reply({
       content: `You're already verified as **${existing.githubLogin}** (${existing.tier}, ${existing.score}/100). Run \`/unlink\` first to link a different account.`,
+      ...EPHEMERAL,
+    });
+    return;
+  }
+  const pending = openVoteFor(ctx, i.guildId, i.user.id);
+  if (pending) {
+    await i.reply({
+      content: `Vote #${pending.id} on your application is still open and closes <t:${Math.floor(Date.parse(pending.closesAt) / 1000)}:R>. You'll get a DM with the result.`,
       ...EPHEMERAL,
     });
     return;
@@ -192,6 +213,7 @@ async function unlink(ctx: AppContext, i: ChatInputCommandInteraction<'cached'>)
     return;
   }
   ctx.db.delete(links).where(eq(links.id, link.id)).run();
+  cancelOpenVotes(ctx, i.guildId, i.user.id, i.user.id);
   const elsewhere = ctx.db
     .select({ id: links.id })
     .from(links)
@@ -325,6 +347,48 @@ async function rubric(ctx: AppContext, i: ChatInputCommandInteraction<'cached'>)
     await i.reply({ content: `Entry tier is now **${g.rubric.tiers[idx]!.name}**.`, ...EPHEMERAL });
     return;
   }
+  if (sub === 'vote') {
+    const enabled = i.options.getBoolean('enabled');
+    const scope = i.options.getString('scope') as VoteScope | null;
+    const channel = i.options.getChannel('channel');
+    const voters = i.options.getRole('voters');
+    const hours = i.options.getInteger('hours');
+    const quorum = i.options.getInteger('quorum');
+    const threshold = i.options.getInteger('threshold');
+    const changed = [enabled, scope, channel, voters, hours, quorum, threshold].some((x) => x !== null);
+    if (changed) {
+      const vote = {
+        ...g.rubric.vote,
+        ...(enabled !== null ? { enabled } : {}),
+        ...(scope ? { scope } : {}),
+        ...(channel ? { channelId: channel.id } : {}),
+        ...(voters ? { eligibleRoleId: voters.id } : {}),
+        ...(hours !== null ? { durationHours: hours } : {}),
+        ...(quorum !== null ? { quorum } : {}),
+        ...(threshold !== null ? { threshold: threshold / 100 } : {}),
+      };
+      updateGuild(ctx, i.guildId, { rubric: rubricSchema.parse({ ...g.rubric, vote }) });
+      logAudit(ctx, i.guildId, i.user.id, 'rubric:vote', undefined, JSON.stringify(vote));
+    }
+    const v = getGuild(ctx, i.guildId).rubric.vote;
+    const scopeText = {
+      review: 'borderline cases only',
+      admitted: 'everyone who would get in, plus borderline',
+      all: 'everyone except hard blocks',
+    }[v.scope];
+    await i.reply({
+      content:
+        `${changed ? 'Saved. ' : ''}Community voting is **${v.enabled ? 'on' : 'off'}**.\n` +
+        `• scope: ${v.scope} (${scopeText})\n` +
+        `• channel: ${v.channelId ? `<#${v.channelId}>` : g.row.reviewChannelId ? `<#${g.row.reviewChannelId}> (review channel)` : 'verify channel'}\n` +
+        `• voters: ${v.eligibleRoleId ? `<@&${v.eligibleRoleId}>` : 'anyone holding a tier role'}\n` +
+        `• open for ${v.durationHours}h · quorum ${v.quorum} · needs ${Math.round(v.threshold * 100)}% yes\n` +
+        `• below quorum → mod review`,
+      allowedMentions: { parse: [] },
+      ...EPHEMERAL,
+    });
+    return;
+  }
   if (sub === 'export') {
     const file = new AttachmentBuilder(Buffer.from(JSON.stringify(g.rubric, null, 2)), {
       name: 'rubric.json',
@@ -384,6 +448,12 @@ function rubricEmbed(g: GuildConfig): EmbedBuilder {
           `review if score ≥ ${r.gates.reviewBelowScore}`,
           `block on: ${r.gates.blockFlags.join(', ') || 'nothing'}`,
         ].join('\n'),
+      },
+      {
+        name: 'Community vote',
+        value: r.vote.enabled
+          ? `on · scope ${r.vote.scope} · ${r.vote.durationHours}h · quorum ${r.vote.quorum} · ${Math.round(r.vote.threshold * 100)}% yes`
+          : 'off (`/rubric vote enabled:true` to turn on)',
       },
     );
 }
@@ -478,6 +548,23 @@ async function reviewList(ctx: AppContext, i: ChatInputCommandInteraction<'cache
   await i.reply({ content: lines.join('\n').slice(0, 1900), allowedMentions: { parse: [] }, ...EPHEMERAL });
 }
 
+async function votesList(ctx: AppContext, i: ChatInputCommandInteraction<'cached'>): Promise<void> {
+  if (!isMod(i)) return deny(i);
+  const open = listOpenVotes(ctx, i.guildId);
+  if (!open.length) {
+    await i.reply({ content: 'No open votes.', ...EPHEMERAL });
+    return;
+  }
+  const lines = open.map((v) => {
+    const link =
+      v.channelId && v.messageId
+        ? `https://discord.com/channels/${i.guildId}/${v.channelId}/${v.messageId}`
+        : null;
+    return `**#${v.id}** <@${v.discordId}> as ${v.githubLogin} · 👍 ${v.yes} · 👎 ${v.no} · closes <t:${Math.floor(Date.parse(v.closesAt) / 1000)}:R>${link ? ` · [open](${link})` : ''}`;
+  });
+  await i.reply({ content: lines.join('\n').slice(0, 1900), allowedMentions: { parse: [] }, ...EPHEMERAL });
+}
+
 async function deny(i: ChatInputCommandInteraction): Promise<void> {
   await i.reply({ content: 'Mods only.', ...EPHEMERAL });
 }
@@ -544,6 +631,50 @@ async function handleButton(ctx: AppContext, i: ButtonInteraction): Promise<void
     return;
   }
 
+  if (ns === 'vote') {
+    const v = getVote(ctx, id);
+    if (!v || v.guildId !== i.guildId) {
+      await i.reply({ content: 'Vote not found.', ...EPHEMERAL });
+      return;
+    }
+    if (v.status !== 'open') {
+      await i.reply({ content: `That vote is already closed (${v.status}).`, ...EPHEMERAL });
+      return;
+    }
+    if (action === 'close') {
+      if (!isMod(i)) {
+        await i.reply({ content: 'Only mods can close a vote early.', ...EPHEMERAL });
+        return;
+      }
+      await i.deferUpdate();
+      const outcome = await resolveVote(ctx, v, i.user.id);
+      await i.followUp({
+        content: `Vote #${v.id} closed: **${outcome ?? 'already closed'}**.`,
+        ...EPHEMERAL,
+      });
+      return;
+    }
+    if (action !== 'yes' && action !== 'no') return;
+    const g = getGuild(ctx, i.guildId);
+    const eligible = voterEligibility(i.member, g.rubric, v.discordId);
+    if (!eligible.ok) {
+      await i.reply({ content: eligible.reason, allowedMentions: { parse: [] }, ...EPHEMERAL });
+      return;
+    }
+    const { vote: updated, changed } = castBallot(ctx, v, i.user.id, action);
+    await i.deferUpdate();
+    await refreshVoteMessage(ctx, updated);
+    const word = action === 'yes' ? '👍 admit' : '👎 reject';
+    const note =
+      changed === 'new'
+        ? `Ballot recorded: ${word}.`
+        : changed === 'switched'
+          ? `Ballot changed to ${word}.`
+          : `You already voted ${word}.`;
+    await i.followUp({ content: `${note} Tally: 👍 ${updated.yes} · 👎 ${updated.no}.`, ...EPHEMERAL });
+    return;
+  }
+
   if (ns === 'verify' && action === 'review') {
     const g = getGuild(ctx, i.guildId);
     const row = ctx.db.select().from(scores).where(eq(scores.id, id)).get();
@@ -576,6 +707,7 @@ async function handleButton(ctx: AppContext, i: ButtonInteraction): Promise<void
       status: 'review' as const,
       reasons: ['Member requested manual review', ...placement.reasons],
     };
+    // a member asking for a human look goes to mods, never to a vote
     const applied = await applyPlacement(
       ctx,
       i.guild,
@@ -583,6 +715,7 @@ async function handleButton(ctx: AppContext, i: ButtonInteraction): Promise<void
       i.user.id,
       { analysis, result, scoreId: row.id },
       forced,
+      { skipVote: true },
     );
     await i.update({
       content: `🟡 Review #${applied.reviewId} opened. A mod will take a look.`,

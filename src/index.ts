@@ -8,6 +8,7 @@ import { makeInteractionHandler } from './discord/handlers.js';
 import { createApp } from './http/app.js';
 import { log } from './lib/logger.js';
 import { StateVerifier } from './lib/state.js';
+import { sweepVotes } from './services/votes.js';
 
 async function main(): Promise<void> {
   const cfg = config();
@@ -45,6 +46,17 @@ async function main(): Promise<void> {
   });
 
   await client.login(cfg.DISCORD_BOT_TOKEN);
+
+  // close community votes whose deadline has passed
+  const sweeper = setInterval(() => {
+    if (!client.isReady()) return;
+    sweepVotes(ctx)
+      .then((n) => {
+        if (n) log.info({ closed: n }, 'vote sweep');
+      })
+      .catch((err) => log.error({ err: String(err) }, 'vote sweep failed'));
+  }, 60_000);
+  sweeper.unref();
 
   let stopping = false;
   const shutdown = (signal: string) => {

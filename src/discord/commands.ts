@@ -67,6 +67,52 @@ export const commands = [
         .setDescription('Set the lowest tier that is admitted')
         .addStringOption((o) => o.setName('name').setDescription('Tier name').setRequired(true)),
     )
+    .addSubcommand((s) =>
+      s
+        .setName('vote')
+        .setDescription('Community voting on applicants. Run with no options to see current settings.')
+        .addBooleanOption((o) => o.setName('enabled').setDescription('Turn voting on or off'))
+        .addStringOption((o) =>
+          o
+            .setName('scope')
+            .setDescription('Who gets a vote')
+            .addChoices(
+              { name: 'review: only borderline cases', value: 'review' },
+              { name: 'admitted: everyone who would get in, plus borderline', value: 'admitted' },
+              { name: 'all: everyone except hard blocks', value: 'all' },
+            ),
+        )
+        .addChannelOption((o) =>
+          o
+            .setName('channel')
+            .setDescription('Where votes are posted (default: review channel)')
+            .addChannelTypes(ChannelType.GuildText),
+        )
+        .addRoleOption((o) =>
+          o.setName('voters').setDescription('Only this role may vote (default: any tier role)'),
+        )
+        .addIntegerOption((o) =>
+          o
+            .setName('hours')
+            .setDescription('How long a vote stays open, 1-168')
+            .setMinValue(1)
+            .setMaxValue(168),
+        )
+        .addIntegerOption((o) =>
+          o
+            .setName('quorum')
+            .setDescription('Minimum ballots for a decision')
+            .setMinValue(1)
+            .setMaxValue(500),
+        )
+        .addIntegerOption((o) =>
+          o
+            .setName('threshold')
+            .setDescription('Percent of yes votes needed, 50-100')
+            .setMinValue(50)
+            .setMaxValue(100),
+        ),
+    )
     .addSubcommand((s) => s.setName('export').setDescription('Download the rubric as JSON'))
     .addSubcommand((s) =>
       s
@@ -74,6 +120,11 @@ export const commands = [
         .setDescription('Replace the rubric from a JSON file')
         .addAttachmentOption((o) => o.setName('file').setDescription('rubric.json').setRequired(true)),
     ),
+
+  new SlashCommandBuilder()
+    .setName('votes')
+    .setDescription('List open community votes')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
 
   new SlashCommandBuilder()
     .setName('whois')

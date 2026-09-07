@@ -19,6 +19,9 @@ export const FLAG_CODES = [
 export const PRESET_NAMES = ['general', 'systems', 'web', 'ml', 'mobile', 'gamedev', 'hackathon'] as const;
 export type PresetName = (typeof PRESET_NAMES)[number];
 
+export const VOTE_SCOPES = ['review', 'admitted', 'all'] as const;
+export type VoteScope = (typeof VOTE_SCOPES)[number];
+
 const tierSchema = z.object({
   name: z.string().min(1).max(32),
   min: z.number().int().min(0).max(100),
@@ -67,6 +70,35 @@ export const rubricSchema = z
       .object({
         everyDays: z.number().int().min(0).max(365).default(30),
         demote: z.boolean().default(false),
+      })
+      .prefault({}),
+    /** Community voting on applicants. Off by default; the score decides. */
+    vote: z
+      .object({
+        enabled: z.boolean().default(false),
+        /**
+         * review: only borderline cases (would have gone to mod review) get a vote
+         * admitted: everyone who would be admitted or reviewed gets a vote; rejected stays rejected
+         * all: everyone except hard blocks gets a vote, the score is advisory
+         */
+        scope: z.enum(VOTE_SCOPES).default('review'),
+        /** where vote posts go; null falls back to the review channel, then the verify channel */
+        channelId: z
+          .string()
+          .regex(/^\d{17,20}$/)
+          .nullable()
+          .default(null),
+        /** who may vote; null means anyone holding a tier role, or anyone if no tier roles are mapped */
+        eligibleRoleId: z
+          .string()
+          .regex(/^\d{17,20}$/)
+          .nullable()
+          .default(null),
+        durationHours: z.number().int().min(1).max(168).default(24),
+        /** minimum ballots for a decision; fewer escalates to mod review */
+        quorum: z.number().int().min(1).max(500).default(3),
+        /** share of yes ballots needed to admit, 0..1 */
+        threshold: z.number().min(0.5).max(1).default(0.6),
       })
       .prefault({}),
   })

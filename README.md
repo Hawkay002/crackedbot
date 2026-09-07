@@ -40,10 +40,20 @@ Names, thresholds, weights, gates, and role mappings are all per server.
 | `/leaderboard`                                       | anyone | top 10 in this server                                  |
 | `/setup verify-channel [modlog-channel] [review-channel]` | admin | where things happen                               |
 | `/rubric view · preset · tier · entry · export · import` | admin | shape the bar                                      |
-| `/review`                                            | mod    | open manual reviews                                    |
+| `/rubric vote`                                       | admin  | turn on community voting, set scope, quorum, threshold |
+| `/review` · `/votes`                                 | mod    | open manual reviews, open votes                        |
 | `/whois <user>` · `/rescore <user>`                  | mod    | inspect and refresh                                    |
 
 Presets: `general`, `systems`, `web`, `ml`, `mobile`, `gamedev`, `hackathon`.
+
+## Community voting
+
+Off by default. `/rubric vote enabled:true` puts applicants in front of the members instead of, or in addition to, the score:
+
+- **scope** `review` votes only on borderline cases, `admitted` on everyone who would get in plus borderline, `all` on everyone except hard blocks.
+- The vote post shows the compact receipt, 👍 Admit and 👎 Reject buttons, a live tally, and a countdown. One ballot per member, changeable. Applicants cannot vote on themselves.
+- Voters need a tier role, or a specific role you choose.
+- At the deadline, or when a mod clicks Close now: yes-share at or above the threshold with quorum met admits, below it rejects, and no quorum escalates to the mod review queue. The applicant gets a DM either way.
 
 ## Run it
 

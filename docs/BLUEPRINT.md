@@ -264,6 +264,39 @@ Buttons: **Link GitHub**, **Request review**, **Approve**, **Deny**, **Show brea
 
 ---
 
+## 8b. Community voting
+
+Per guild, off by default, configured with `/rubric vote`. The score still runs; voting decides what happens with the placement.
+
+```jsonc
+"vote": {
+  "enabled": false,
+  "scope": "review",        // review | admitted | all
+  "channelId": null,        // falls back to the review channel, then the verify channel
+  "eligibleRoleId": null,   // null = anyone holding a tier role (or anyone, if no tier roles are mapped)
+  "durationHours": 24,
+  "quorum": 3,
+  "threshold": 0.6          // share of yes ballots needed
+}
+```
+
+| Placement status | scope `review` | scope `admitted` | scope `all` |
+|------------------|----------------|------------------|-------------|
+| admitted         | admitted       | vote             | vote        |
+| review           | vote           | vote             | vote        |
+| rejected         | rejected       | rejected         | vote        |
+| blocked          | blocked        | blocked          | blocked     |
+
+Mechanics:
+- One vote post per applicant with the compact receipt, 👍 Admit, 👎 Reject, and a mods-only Close now button. Content shows a live tally and a Discord relative timestamp for the deadline.
+- Ballots live in their own table, one per voter per vote, changeable. Only counts are shown, never who voted which way.
+- Eligibility: not a bot, not the applicant, holds the eligible role if set, otherwise holds any tier role.
+- Resolution runs at the deadline from a 60-second in-process sweeper, or immediately when a mod closes early. Outcome is pure: below quorum escalates to the mod review queue, otherwise yes ÷ total at or above the threshold admits and anything else rejects.
+- Admission grants the tier the score earned (never below the entry tier), posts the welcome, and DMs the applicant. Rejection and escalation DM the applicant too. Every outcome hits the modlog and the audit table.
+- A member who clicks Request review on a rejection always goes to mods, never to a vote. `/unlink` cancels any open vote on that member.
+
+Why this is the right shape: the score stays the source of truth about the GitHub, and the community decides what to do with it. Communities that distrust automation can set `scope: all`; communities that only want humans on the edge cases keep the default.
+
 ## 9. Growth features (each under one hour)
 
 - **SVG badge**: `GET /badge/:login.svg`, shields style, "Cracked Score 78 · Shipper", cached 24 h. People paste it into their README and every badge links back to the repo.

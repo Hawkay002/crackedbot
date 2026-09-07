@@ -1,13 +1,12 @@
 import { gzipSync } from 'node:zlib';
-import { type Guild, type GuildMember, type MessageCreateOptions, WebhookClient } from 'discord.js';
-import { and, desc, eq, ne } from 'drizzle-orm';
+import { type Guild, WebhookClient } from 'discord.js';
+import { and, eq, ne } from 'drizzle-orm';
 import type { AppContext } from '../context.js';
-import { audit, links, reviews, scores } from '../db/schema.js';
+import { links, scores } from '../db/schema.js';
 import {
   profileOf,
   receiptEmbed,
   requestReviewButton,
-  reviewButtons,
   statusLine,
   welcomeEmbed,
 } from '../discord/receipt.js';
@@ -18,6 +17,12 @@ import { snowflakeToDate } from '../lib/snowflake.js';
 import type { VerifyState } from '../lib/state.js';
 import { type Placement, place, type Rubric, type ScoreResult, score } from '../scoring/index.js';
 import { type GuildConfig, getGuild } from './guilds.js';
+import { logAudit, sendTo, syncTierRoles, upsertLink } from './members.js';
+import { openReview } from './reviews.js';
+import { openVote, shouldVote, voteChannel } from './votes.js';
+
+export { logAudit, sendTo, syncTierRoles, upsertLink } from './members.js';
+export { latestScore } from './scores.js';
 
 const DAY = 86_400_000;
 
@@ -65,83 +70,16 @@ export function sharedGithub(ctx: AppContext, guildId: string, githubId: string,
   return Boolean(other);
 }
 
-export async function syncTierRoles(
-  member: GuildMember,
-  rubric: Rubric,
-  grantRoleId: string | null,
-): Promise<void> {
-  const tierRoles = new Set(rubric.tiers.map((t) => t.roleId).filter((r): r is string => Boolean(r)));
-  const toRemove = [...tierRoles].filter((r) => r !== grantRoleId && member.roles.cache.has(r));
-  if (toRemove.length) await member.roles.remove(toRemove, 'crackedbot tier change');
-  if (grantRoleId && !member.roles.cache.has(grantRoleId))
-    await member.roles.add(grantRoleId, 'crackedbot tier');
-}
+export type Route = Placement['status'] | 'vote';
 
-export function upsertLink(
-  ctx: AppContext,
-  guildId: string,
-  discordId: string,
-  analysis: Analysis,
-  result: ScoreResult,
-  tier: string,
-): void {
-  ctx.db
-    .insert(links)
-    .values({
-      guildId,
-      discordId,
-      githubId: analysis.profile.id,
-      githubLogin: analysis.profile.login,
-      tier,
-      score: result.total,
-    })
-    .onConflictDoUpdate({
-      target: [links.guildId, links.discordId],
-      set: {
-        githubId: analysis.profile.id,
-        githubLogin: analysis.profile.login,
-        tier,
-        score: result.total,
-        rescoredAt: new Date().toISOString(),
-      },
-    })
-    .run();
-}
-
-export async function sendTo(
-  ctx: AppContext,
-  channelId: string | null | undefined,
-  payload: string | MessageCreateOptions,
-): Promise<string | null> {
-  if (!channelId) return null;
-  try {
-    const ch = await ctx.client.channels.fetch(channelId);
-    if (!ch || !ch.isSendable()) return null;
-    const msg = await ch.send(payload);
-    return msg.id;
-  } catch (err) {
-    log.warn({ channelId, err: String(err) }, 'could not send to channel');
-    return null;
-  }
-}
-
-export function logAudit(
-  ctx: AppContext,
-  guildId: string,
-  actorId: string,
-  action: string,
-  targetId?: string,
-  detail?: string,
-) {
-  ctx.db
-    .insert(audit)
-    .values({ guildId, actorId, targetId: targetId ?? null, action, detail: detail ?? null })
-    .run();
+/** What actually happens to this placement in this guild, once voting is taken into account. */
+export function routeFor(placement: Placement, rubric: Rubric): Route {
+  return shouldVote(placement.status, rubric) ? 'vote' : placement.status;
 }
 
 /**
- * Apply a placement inside a guild: roles, link row, review row, welcome, modlog.
- * Returns the message components the applicant should see.
+ * Apply a placement inside a guild: roles, link row, review or vote post, welcome, modlog.
+ * Returns the message the applicant should see.
  */
 export async function applyPlacement(
   ctx: AppContext,
@@ -150,13 +88,34 @@ export async function applyPlacement(
   discordId: string,
   scored: Scored,
   placement: Placement,
-): Promise<{ content: string; roleError?: string; reviewId?: number }> {
+  opts: { skipVote?: boolean } = {},
+): Promise<{ route: Route; content: string; roleError?: string; reviewId?: number; voteId?: number }> {
   const { analysis, result, scoreId } = scored;
   const login = analysis.profile.login;
   let roleError: string | undefined;
   let reviewId: number | undefined;
+  let voteId: number | undefined;
+  const route: Route = opts.skipVote ? placement.status : routeFor(placement, g.rubric);
+  const icon = { admitted: '✅', review: '🟡', rejected: '❌', blocked: '⛔', vote: '🗳️' }[route];
 
-  if (placement.status === 'admitted') {
+  if (route === 'vote') {
+    const v = await openVote(ctx, guild, g, discordId, scored, placement);
+    voteId = v.id;
+    const ch = voteChannel(g);
+    const closes = Math.floor(Date.parse(v.closesAt) / 1000);
+    const content =
+      `🗳️ **Your application is up for a community vote**${ch ? ` in <#${ch}>` : ''}. ` +
+      `It closes <t:${closes}:R>. You'll get a DM with the result.` +
+      `\nYour score: **${result.total}/100 · ${placement.tier.name}**.`;
+    await sendTo(ctx, g.row.modlogChannelId, {
+      content: `${icon} <@${discordId}> → [${login}](<https://github.com/${login}>) · **${result.total}** · ${placement.tier.name} · vote #${v.id} opened`,
+      allowedMentions: { parse: [] },
+    });
+    logAudit(ctx, guild.id, discordId, 'verify:vote', discordId, `${login} ${result.total} vote #${v.id}`);
+    return { route, content, voteId };
+  }
+
+  if (route === 'admitted') {
     upsertLink(ctx, guild.id, discordId, analysis, result, placement.grantTier.name);
     try {
       const member = await guild.members.fetch(discordId);
@@ -170,39 +129,26 @@ export async function applyPlacement(
     });
   }
 
-  if (placement.status === 'review') {
-    const row = ctx.db
-      .insert(reviews)
-      .values({
-        guildId: guild.id,
-        discordId,
-        githubId: analysis.profile.id,
-        githubLogin: login,
-        scoreId,
-        tier: placement.grantTier.name,
-        reason: placement.reasons.join('\n'),
-      })
-      .returning({ id: reviews.id })
-      .get();
-    reviewId = row.id;
-    const messageId = await sendTo(ctx, g.row.reviewChannelId, {
-      content: `Review #${row.id} · <@${discordId}> as **${login}**\n${placement.reasons.map((r) => `• ${r}`).join('\n')}`,
-      embeds: [receiptEmbed(result, placement, profileOf(analysis), { compact: true })],
-      components: [reviewButtons(row.id)],
+  if (route === 'review') {
+    reviewId = await openReview(ctx, guild, g, {
+      discordId,
+      analysis,
+      result,
+      scoreId,
+      placement,
+      reasons: placement.reasons,
     });
-    if (messageId) ctx.db.update(reviews).set({ messageId }).where(eq(reviews.id, row.id)).run();
   }
 
-  const icon = { admitted: '✅', review: '🟡', rejected: '❌', blocked: '⛔' }[placement.status];
   await sendTo(ctx, g.row.modlogChannelId, {
-    content: `${icon} <@${discordId}> → [${login}](<https://github.com/${login}>) · **${result.total}** · ${placement.tier.name} · ${placement.status}${
+    content: `${icon} <@${discordId}> → [${login}](<https://github.com/${login}>) · **${result.total}** · ${placement.tier.name} · ${route}${
       placement.flags.length ? ` · flags: ${placement.flags.map((f) => f.code).join(', ')}` : ''
     }`,
     allowedMentions: { parse: [] },
   });
-  logAudit(ctx, guild.id, discordId, `verify:${placement.status}`, discordId, `${login} ${result.total}`);
+  logAudit(ctx, guild.id, discordId, `verify:${route}`, discordId, `${login} ${result.total}`);
 
-  return { content: statusLine(placement), roleError, reviewId };
+  return { route, content: statusLine(placement), roleError, reviewId };
 }
 
 /** Full pipeline after the OAuth callback. */
@@ -262,7 +208,7 @@ export async function completeVerification(
   });
   const applied = await applyPlacement(ctx, guild, g, state.u, scored, placement);
 
-  const components = placement.status === 'rejected' ? [requestReviewButton(scored.scoreId)] : [];
+  const components = applied.route === 'rejected' ? [requestReviewButton(scored.scoreId)] : [];
   await edit({
     content: [applied.content, applied.roleError].filter(Boolean).join('\n'),
     embeds: [receiptEmbed(scored.result, placement, profileOf(scored.analysis))],
@@ -290,10 +236,4 @@ export async function completeVerification(
     total: scored.result.total,
     tier: placement.tier.name,
   };
-}
-
-export function latestScore(ctx: AppContext, githubId: string) {
-  return (
-    ctx.db.select().from(scores).where(eq(scores.githubId, githubId)).orderBy(desc(scores.id)).get() ?? null
-  );
 }

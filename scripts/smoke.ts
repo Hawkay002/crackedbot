@@ -8,7 +8,7 @@ import type { AppContext } from '../src/context.js';
 import { openDb } from '../src/db/index.js';
 import { scores } from '../src/db/schema.js';
 import { createApp } from '../src/http/app.js';
-import { StateVerifier, signState } from '../src/lib/state.js';
+import { newNonce, StateVerifier, signState } from '../src/lib/state.js';
 import { getGuild, updateGuild } from '../src/services/guilds.js';
 
 let failures = 0;
@@ -37,7 +37,11 @@ const tables = (
 )
   .map((r) => r.name)
   .filter((n) => !n.startsWith('__') && !n.startsWith('sqlite_'));
-check('migrations create tables', tables.join(',') === 'audit,guilds,links,reviews,scores', tables.join(','));
+check(
+  'migrations create tables',
+  tables.join(',') === 'audit,ballots,guilds,links,reviews,scores,votes',
+  tables.join(','),
+);
 
 const fakeClient = { isReady: () => true, guilds: { cache: { size: 3 } } };
 const ctx = {
@@ -87,11 +91,13 @@ check('/badge rejects bad login', r.status === 400);
 r = await get('/auth/start');
 check('/auth/start without state is 400', r.status === 400);
 
+const nonce = newNonce();
+ctx.verifier.remember(nonce, 'interaction-token');
 const s = signState(cfg.STATE_SECRET, {
   g: '111111111111111111',
   u: '333333333333333333',
-  t: 'tok',
   c: '222222222222222222',
+  n: nonce,
 });
 r = await get(`/auth/start?s=${encodeURIComponent(s)}`);
 const loc = r.headers.get('location') ?? '';

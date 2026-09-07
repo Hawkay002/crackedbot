@@ -91,6 +91,7 @@ Legend: `[ ]` todo, `[~]` in progress, `[x]` done. Each phase ends with a checkp
 - [x] `/whois <user>` for mods
 - [~] `/unlink` for self (mod-forced unlink not built yet)
 - [x] Audit table written on every role change with actor, target, reason
+- [x] Community voting (added 2026-09-07): `/rubric vote` settings, `votes` + `ballots` tables, vote post with Admit/Reject/Close buttons and live tally, eligibility rules, 60 s sweeper, escalation to mod review below quorum, DMs on every outcome, `/votes` list, pure `tallyOutcome`/`shouldVote` under test
 
 **Checkpoint:** a mod can handle a borderline applicant entirely from Discord without touching the server.
 
