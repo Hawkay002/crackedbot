@@ -1,0 +1,24 @@
+# For hosts that must not publish ports (home boxes, Tailscale-only servers).
+# The bot listens on 127.0.0.1:8080 only; expose it with Tailscale Funnel or a
+# named Cloudflare Tunnel, which also terminates TLS. No Caddy.
+#   docker compose -f compose.tunnel.yaml up -d
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      PORT: "8080"
+    volumes:
+      - bot-data:/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot-data:
